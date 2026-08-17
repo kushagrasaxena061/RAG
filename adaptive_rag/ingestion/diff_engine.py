@@ -6,10 +6,6 @@ from adaptive_rag.context.token_budget import TokenBudgetManager
 from adaptive_rag.config import IngestionConfig
 
 class IncrementalDiffEngine:
-    """
-    Computes page-level cryptographic diffs between document versions.
-    Re-indexes only changed pages to prevent redundant chunking and embedding.
-    """
     def __init__(self, config: IngestionConfig, token_counter: TokenBudgetManager):
         self.chunker = HierarchicalChunker(config, token_counter)
         self.page_hashes_by_doc: Dict[str, Dict[int, str]] = {}
@@ -27,8 +23,9 @@ class IncrementalDiffEngine:
         prev_hashes = self.page_hashes_by_doc.get(doc_name, {})
         prev_chunks = self.cached_chunks_by_page.get(doc_name, {})
 
-        all_parents: List[Chunk] = []
-        all_children: List[Chunk] = []
+        # Use dictionaries to mathematically guarantee zero duplicate IDs across pages
+        unique_parents: Dict[str, Chunk] = {}
+        unique_children: Dict[str, Chunk] = {}
         
         reused_pages = 0
         modified_pages = 0
@@ -41,23 +38,22 @@ class IncrementalDiffEngine:
             p_hash = self.compute_page_hash(page)
             new_hashes[p_num] = p_hash
 
-            # Unchanged page: reuse previously computed chunks
             if p_num in prev_hashes and prev_hashes[p_num] == p_hash and p_num in prev_chunks:
                 cached_p, cached_c = prev_chunks[p_num]
-                all_parents.extend(cached_p)
-                all_children.extend(cached_c)
+                for p in cached_p: unique_parents[p.chunk_id] = p
+                for c in cached_c: unique_children[c.chunk_id] = c
                 new_chunks[p_num] = (cached_p, cached_c)
                 reused_pages += 1
             else:
-                # Page is new or modified: chunk incrementally
                 single_page_doc = new_doc.model_copy(update={
                     "pages": [page],
                     "sections": [s for s in new_doc.sections if s.page_start <= p_num <= s.page_end]
                 })
                 p_chunks, c_chunks = self.chunker.chunk_document(single_page_doc)
                 
-                all_parents.extend(p_chunks)
-                all_children.extend(c_chunks)
+                for p in p_chunks: unique_parents[p.chunk_id] = p
+                for c in c_chunks: unique_children[c.chunk_id] = c
+                
                 new_chunks[p_num] = (p_chunks, c_chunks)
                 modified_pages += 1
 
@@ -69,4 +65,4 @@ class IncrementalDiffEngine:
             "reused_pages": reused_pages,
             "modified_pages": modified_pages
         }
-        return all_parents, all_children, stats
+        return list(unique_parents.values()), list(unique_children.values()), stats

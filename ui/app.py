@@ -23,9 +23,10 @@ with st.sidebar:
                         st.success("Indexed successfully!")
                         st.json(response.json())
                     else:
-                        st.error("Upload failed.")
+                        # Display the actual error text from the backend to the user
+                        st.error(f"Upload failed. Server response: {response.text}")
                 except Exception as e:
-                    st.error("Backend API is not running. Start FastAPI on port 8000.")
+                    st.error(f"Backend API is not running. Exception: {e}")
         else:
             st.warning("Please upload a file first.")
 
@@ -45,14 +46,18 @@ with tab1:
         with st.chat_message("assistant"):
             with st.spinner("Planning, Retrieving, Reranking, & Compressing Context..."):
                 try:
-                    res = requests.post(f"{API_URL}/ask", json={"query": prompt, "mock_mode": False}).json()
-                    answer = res.get("answer", "Error generating answer.")
-                    st.markdown(answer)
-                    
-                    with st.expander("📊 Observability & Token Metrics"):
-                        st.json(res.get("telemetry", {}))
+                    res = requests.post(f"{API_URL}/ask", json={"query": prompt, "mock_mode": False})
+                    if res.status_code == 200:
+                        data = res.json()
+                        answer = data.get("answer", "Error generating answer.")
+                        st.markdown(answer)
                         
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                        with st.expander("📊 Observability & Token Metrics"):
+                            st.json(data.get("telemetry", {}))
+                            
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                    else:
+                        st.error(f"Error {res.status_code}: {res.text}")
                 except Exception as e:
                     st.error("Cannot connect to Backend API. Is FastAPI running on port 8000?")
 

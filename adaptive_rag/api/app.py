@@ -1,7 +1,8 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from typing import List
 from pydantic import BaseModel
 import os
+import traceback
 
 from adaptive_rag.pipeline.orchestrator import RAGPipelineOrchestrator
 from adaptive_rag.observability.tracker import TelemetryLogger
@@ -35,18 +36,25 @@ class QueryRequest(BaseModel):
 
 @app.post("/upload")
 async def upload_documents(files: List[UploadFile] = File(...)):
-    results = []
-    for file in files:
-        content = await file.read()
-        doc, parents, children = ingestion_pipeline.ingest_pdf_bytes(content, file.filename)
-        
-        all_chunks = parents + children
-        if all_chunks:
-            vec_idx.add_chunks(all_chunks)
-            bm25_idx.add_chunks(all_chunks)
+    try:
+        results = []
+        for file in files:
+            content = await file.read()
+            doc, parents, children = ingestion_pipeline.ingest_pdf_bytes(content, file.filename)
             
-        results.append({"filename": file.filename, "chunks_indexed": len(all_chunks)})
-    return {"uploaded": results}
+            all_chunks = parents + children
+            if all_chunks:
+                # Defensive deduplication right before database insertion
+                unique_chunks = list({c.chunk_id: c for c in all_chunks}.values())
+                vec_idx.add_chunks(unique_chunks)
+                bm25_idx.add_chunks(unique_chunks)
+                
+            results.append({"filename": file.filename, "chunks_indexed": len(all_chunks)})
+        return {"uploaded": results}
+    except Exception as e:
+        print(f"--- UPLOAD ERROR ---")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ask")
 def ask_question(request: QueryRequest):
