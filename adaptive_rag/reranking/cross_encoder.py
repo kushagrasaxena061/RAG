@@ -1,33 +1,29 @@
+import torch
 from sentence_transformers import CrossEncoder
 from typing import List
 from adaptive_rag.models.schema import Chunk
 
 class Reranker:
-    """Uses a Cross-Encoder to highly accurately score query-document relevance."""
-    
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
-        # We use a fast, lightweight cross-encoder optimized for RAG.
-        # It evaluates the query and chunk simultaneously rather than separately.
-        self.model = CrossEncoder(model_name, max_length=512)
+        # Auto-detect Apple Silicon GPU (MPS) or CUDA
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+            
+        self.model = CrossEncoder(model_name, max_length=512, device=device)
 
-    def rerank(self, query: str, chunks: List[Chunk], top_k: int = None) -> List[Chunk]:
+    def rerank(self, query: str, chunks: List[Chunk], top_k: int = 5) -> List[Chunk]:
         if not chunks:
             return []
         
-        # Prepare [Query, Document] pairs for the cross-encoder
-        pairs = [[query, chunk.content] for chunk in chunks]
+        # Limit candidate pool to top 8 to prevent cross-encoder latency spikes
+        candidates = chunks[:8]
+        pairs = [[query, chunk.content] for chunk in candidates]
         
-        # Predict relevance scores
-        scores = self.model.predict(pairs)
+        scores = self.model.predict(pairs, batch_size=8, show_progress_bar=False)
+        scored_chunks = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
         
-        # Zip chunks with their new extreme-precision scores and sort descending
-        scored_chunks = list(zip(chunks, scores))
-        scored_chunks.sort(key=lambda x: x[1], reverse=True)
-        
-        # Extract the sorted chunks
-        reranked = [chunk for chunk, score in scored_chunks]
-        
-        if top_k:
-            reranked = reranked[:top_k]
-            
-        return reranked
+        return [chunk for chunk, score in scored_chunks[:top_k]]

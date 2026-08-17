@@ -10,6 +10,7 @@ from adaptive_rag.retrieval.vector_index import VectorIndex
 from adaptive_rag.retrieval.bm25_index import BM25Index
 from adaptive_rag.retrieval.hybrid_search import HybridRetriever
 from adaptive_rag.context.token_budget import TokenBudgetManager
+from adaptive_rag.memory.manager import TwoTierMemory
 from adaptive_rag.config import global_config
 
 app = FastAPI(title="Adaptive Token-Efficient RAG API")
@@ -21,7 +22,11 @@ hybrid_retriever = HybridRetriever(vec_idx, bm25_idx)
 
 token_manager = TokenBudgetManager(global_config.model)
 logger = TelemetryLogger()
-orchestrator = RAGPipelineOrchestrator(hybrid_retriever, token_manager, logger)
+
+mem_vec_idx = VectorIndex(persist_directory="./data/chroma_memory", collection_name="memory")
+memory_manager = TwoTierMemory(token_manager, mem_vec_idx)
+
+orchestrator = RAGPipelineOrchestrator(hybrid_retriever, token_manager, memory_manager, logger)
 ingestion_pipeline = IngestionPipeline()
 
 class QueryRequest(BaseModel):

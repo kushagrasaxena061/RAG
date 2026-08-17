@@ -1,7 +1,8 @@
 from pydantic import BaseModel, Field
 
 class ModelContextConfig(BaseModel):
-    model_name: str = Field(default="llama-3-70b-instruct")
+    """Configuration for LLM context limits and token budget limits."""
+    model_name: str = Field(default="qwen3:latest")
     context_window_tokens: int = Field(default=32768)
     max_output_tokens: int = Field(default=4096)
     system_prompt_reserve: int = Field(default=1024)
@@ -10,6 +11,7 @@ class ModelContextConfig(BaseModel):
     safety_margin_tokens: int = Field(default=512)
 
 class IngestionConfig(BaseModel):
+    """Configuration for hierarchical chunking and document ingestion."""
     parent_chunk_size_tokens: int = Field(default=1024)
     child_chunk_size_tokens: int = Field(default=256)
     chunk_overlap_tokens: int = Field(default=32)
