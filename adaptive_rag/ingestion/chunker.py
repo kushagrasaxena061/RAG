@@ -21,6 +21,22 @@ class HierarchicalChunker:
 
         return parent_chunks, child_chunks
 
+    def _format_markdown_table(self, headers: List[str], rows: List[List[str]]) -> str:
+        """Formats tabular rows and headers into structured, LLM-readable Markdown tables."""
+        if not headers and not rows:
+            return ""
+        
+        col_count = max(len(headers), max((len(r) for r in rows), default=0))
+        h = headers + [""] * (col_count - len(headers))
+        
+        md_lines = []
+        md_lines.append("| " + " | ".join(h) + " |")
+        md_lines.append("| " + " | ".join(["---"] * col_count) + " |")
+        for row in rows:
+            r = row + [""] * (col_count - len(row))
+            md_lines.append("| " + " | ".join(r) + " |")
+        return "\n".join(md_lines)
+
     def _chunk_section(self, section: Section, document: Document, seen_hashes: set) -> Tuple[List[Chunk], List[Chunk]]:
         parents, children = [], []
         parent_idx = 1
@@ -49,10 +65,12 @@ class HierarchicalChunker:
                 children.extend(c_chunks)
                 parent_idx += 1
 
-        # 2. Process Tables (Tables bypass word-splitting, kept intact for Token Efficiency)
+        # 2. Process Tables (Preserve table structure with markdown representation)
         for table in section.tables:
-            table_id = f"{section.section_id}_p{parent_idx}_table"
-            table_content = f"Table Headers: {', '.join(table.headers)}\nData:\n{table.raw_csv}"
+            table_id = f"{section.section_id}_p{parent_idx}_table_pg{section.page_start}"
+            md_table = self._format_markdown_table(table.headers, table.rows)
+            table_content = f"### [STRUCTURED TABLE: {section.title} | {document.document_name}]\n{md_table}\n"
+            
             t_tokens = self.token_counter.count_tokens(table_content)
             t_hash = hashlib.sha256(table_content.encode("utf-8")).hexdigest()
 
@@ -62,12 +80,11 @@ class HierarchicalChunker:
                 version=document.version,
                 page_number=section.page_start,
                 section_title=section.title,
-                section_path=[section.title],
+                section_path=[document.document_name, section.title, "Table"],
                 content_type=ContentType.TABLE,
                 created_at=time.time()
             )
 
-            # Table is its own parent and child simultaneously to preserve structure
             table_chunk = Chunk(
                 chunk_id=table_id,
                 chunk_type=ChunkType.CHILD,
@@ -88,7 +105,7 @@ class HierarchicalChunker:
             return None, []
 
         p_hash = hashlib.sha256(parent_text.encode("utf-8")).hexdigest()
-        parent_id = f"{section.section_id}_p{parent_idx}"
+        parent_id = f"{section.section_id}_p{parent_idx}_pg{section.page_start}"
 
         metadata = ChunkMetadata(
             document_id=document.document_id,
@@ -96,7 +113,7 @@ class HierarchicalChunker:
             version=document.version,
             page_number=section.page_start,
             section_title=section.title,
-            section_path=[section.title],
+            section_path=[document.document_name, section.title],
             content_type=ContentType.TEXT,
             created_at=time.time(),
         )

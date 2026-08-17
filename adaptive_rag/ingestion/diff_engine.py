@@ -51,8 +51,15 @@ class IncrementalDiffEngine:
                 })
                 p_chunks, c_chunks = self.chunker.chunk_document(single_page_doc)
                 
-                for p in p_chunks: unique_parents[p.chunk_id] = p
-                for c in c_chunks: unique_children[c.chunk_id] = c
+                # Append page number to chunk IDs to guarantee global uniqueness
+                for p in p_chunks:
+                    p.chunk_id = f"{p.chunk_id}_pg{p_num}"
+                    unique_parents[p.chunk_id] = p
+                for c in c_chunks:
+                    c.chunk_id = f"{c.chunk_id}_pg{p_num}"
+                    if c.parent_chunk_id:
+                        c.parent_chunk_id = f"{c.parent_chunk_id}_pg{p_num}"
+                    unique_children[c.chunk_id] = c
                 
                 new_chunks[p_num] = (p_chunks, c_chunks)
                 modified_pages += 1

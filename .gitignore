@@ -1,45 +1,22 @@
-# Virtual environment
-.venv/
+# Environment and Cache
 venv/
 env/
-
-# Python
+.env
 __pycache__/
 *.py[cod]
 *$py.class
 
-# IDE
-.vscode/
+# Local Databases and Vector Indices
+data/
+*.pkl
+*.sqlite3
+
+# Uploaded Files and Reports
+*.pdf
+rag_telemetry_*.json
+rag_report_*.md
+
+# OS and IDE Files
+.DS_Store
 .idea/
-
-# macOS
-.DS_Store
-
-# Environment variables / secrets
-.env
-.env.*
-!.env.example
-
-# Logs
-*.log
-logs/
-
-# ML artifacts
-checkpoints/
-*.pt
-*.pth
-*.ckpt
-*.safetensors
-
-# Experiment tracking
-wandb/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Data
-data/raw/
-data/processed/
-
-# OS
-.DS_Store
+.vscode/
