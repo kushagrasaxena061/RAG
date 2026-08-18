@@ -1,26 +1,11 @@
-version: '3.8'
-
+version: "3.8"
 services:
-  api:
+  adaptive-rag:
     build: .
-    container_name: adaptive_rag_api
-    command: uvicorn adaptive_rag.api.app:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
+      - "8501:8501"
     volumes:
       - ./data:/app/data
     environment:
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-  ui:
-    build: .
-    container_name: adaptive_rag_ui
-    command: streamlit run ui/app.py --server.address=0.0.0.0
-    ports:
-      - "8501:8501"
-    environment:
-      - API_URL=http://api:8000
-    depends_on:
-      - api
+      - API_URL=http://localhost:8000

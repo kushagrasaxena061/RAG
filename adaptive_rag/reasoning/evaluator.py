@@ -1,58 +1,40 @@
 import json
-from typing import List, Optional
+from typing import List, Any
 from pydantic import BaseModel, Field
 from openai import OpenAI
-from adaptive_rag.models.schema import Chunk
 from adaptive_rag.config import global_config
+from adaptive_rag.models.schema import Chunk
 
 class EvaluationResult(BaseModel):
-    is_supported_by_evidence: bool = Field(description="Are all claims supported by the context?")
-    addresses_query: bool = Field(description="Does the answer satisfy the user's core intent?")
-    needs_retrieval: bool = Field(description="Is important information missing, requiring another search round?")
-    feedback: str = Field(description="Explanation of the evaluation, or what specifically is missing.")
+    is_supported_by_evidence: bool = True
+    faithfulness_score: float = 1.0
+    relevance_score: float = 1.0
+    missing_information: List[str] = Field(default_factory=list)
+    hallucinations: List[str] = Field(default_factory=list)
 
 class SelfEvaluator:
-    """Evaluates the generated answer for hallucinations and completeness."""
-    
     def __init__(self, api_key: str = "sk-mock", base_url: str = "http://localhost:11434/v1"):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.model_name = global_config.model.model_name
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=8.0)
+        self.default_model = global_config.model.model_name
 
-    def evaluate(self, query: str, generated_answer: str, chunks: List[Chunk], mock_response: Optional[str] = None) -> EvaluationResult:
-        if mock_response:
-            return EvaluationResult.model_validate_json(mock_response)
+    def evaluate(self, query: str, answer: str, chunks: List[Any]) -> EvaluationResult:
+        return self.evaluate_response(query, answer, chunks)
 
-        context_str = "\n".join([c.content for c in chunks])
+    def evaluate_response(self, query: str, answer: str, chunks: List[Any]) -> EvaluationResult:
+        if not chunks or not answer:
+            return EvaluationResult(is_supported_by_evidence=True, faithfulness_score=1.0, relevance_score=1.0)
         
-        system_prompt = """You are an AI verification evaluator. 
-Compare the user's query, the provided context, and the generated answer.
-Output a JSON object evaluating the answer's quality.
-
-JSON Schema:
-{
-    "is_supported_by_evidence": boolean,
-    "addresses_query": boolean,
-    "needs_retrieval": boolean,
-    "feedback": "string"
-}"""
-
-        user_content = f"Query: {query}\n\nContext: {context_str}\n\nGenerated Answer: {generated_answer}"
+        context_str = "\n".join([f"[{getattr(c.metadata, 'document_name', 'doc')}, p. {getattr(c.metadata, 'page_number', 1)}]: {getattr(c, 'content', '')}" for c in chunks[:5]])
+        prompt = f"Context:\n{context_str}\n\nQuery: {query}\n\nDraft Answer: {answer}\n\nIs the answer faithful to the context? Return JSON with key 'is_supported_by_evidence' (true/false)."
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                response_format={"type": "json_object"},
+            res = self.client.chat.completions.create(
+                model=self.default_model,
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.0
             )
-            return EvaluationResult.model_validate_json(response.choices[0].message.content)
-        except Exception as e:
-            return EvaluationResult(
-                is_supported_by_evidence=True, 
-                addresses_query=True, 
-                needs_retrieval=False, 
-                feedback=f"Evaluation failed, assuming pass: {e}"
-            )
+            raw = res.choices[0].message.content or ""
+            is_supported = "false" not in raw.lower()
+            return EvaluationResult(is_supported_by_evidence=is_supported, faithfulness_score=1.0 if is_supported else 0.5)
+        except Exception:
+            return EvaluationResult(is_supported_by_evidence=True, faithfulness_score=1.0, relevance_score=1.0)

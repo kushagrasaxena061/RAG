@@ -1,63 +1,98 @@
 import json
+import re
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
 from openai import OpenAI
+from adaptive_rag.models.schema import QueryPlan, QueryCategory
 from adaptive_rag.config import global_config
 
-class QueryPlan(BaseModel):
-    """Structured reasoning metadata output from the Llama planner."""
-    intent: str = Field(description="The core intent of the user query.")
-    sub_queries: List[str] = Field(description="1 or more rewritten queries optimized for vector/BM25 search.")
-    filters: Dict[str, Any] = Field(default_factory=dict, description="Extracted metadata filters (e.g., year, document_type).")
-    retrieval_strategy: str = Field(description="Strategy: 'simple', 'multi_step', or 'conversational'.")
-    confidence: float = Field(description="Confidence score (0.0 to 1.0) in the understanding of the query.")
-
 class LlamaQueryPlanner:
-    """Uses a Llama-family model to understand, rewrite, and route queries."""
-    
     def __init__(self, api_key: str = "sk-mock", base_url: str = "http://localhost:11434/v1"):
-        # Defaults to a local endpoint (e.g., Ollama), can be overridden for Together/Groq/vLLM
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model_name = global_config.model.model_name
 
-    def plan(self, user_query: str, mock_response: Optional[str] = None) -> QueryPlan:
-        """Generates a structured query plan. Allows mock_response for deterministic testing."""
+    def _rule_based_fallback(self, user_query: str) -> QueryPlan:
+        query_lower = user_query.lower()
+        
+        tabular_keywords = ["table", "revenue", "profit", "ebitda", "salary", "balance", "cost", "breakdown", "numbers", "financials"]
+        is_tabular = any(w in query_lower for w in tabular_keywords)
+        
+        comparative_keywords = ["compare", "difference", "vs", "versus", "between", "change from", "trend"]
+        is_comparative = any(w in query_lower for w in comparative_keywords)
+        
+        visual_keywords = ["chart", "figure", "graph", "diagram", "image", "plot"]
+        is_visual = any(w in query_lower for w in visual_keywords)
+        
+        category = QueryCategory.SIMPLE
+        if is_visual: category = QueryCategory.VISUAL
+        elif is_tabular and is_comparative: category = QueryCategory.MULTI_STEP
+        elif is_tabular: category = QueryCategory.TABULAR
+        elif is_comparative: category = QueryCategory.COMPARATIVE
+
+        years = [int(y) for y in re.findall(r"\b(20\d\d|19\d\d)\b", user_query)]
+        filters = {}
+        if years:
+            filters["year"] = years if len(years) > 1 else years[0]
+
+        sub_queries = [user_query]
+        if is_comparative and len(years) >= 2:
+            sub_queries = [
+                f"{user_query} for {years[0]}",
+                f"{user_query} for {years[1]}",
+                f"Comparison of factors between {years[0]} and {years[1]}"
+            ]
+
+        adaptive_top_k = 12 if (is_comparative or is_tabular) else 6
+        bm25_weight = 0.7 if (is_tabular or years) else 0.5
+        vector_weight = 0.3 if (is_tabular or years) else 0.5
+
+        return QueryPlan(
+            intent=user_query,
+            category=category,
+            rewritten_query=user_query,
+            expanded_queries=[user_query, f"{user_query} details summary"],
+            sub_queries=sub_queries,
+            filters=filters,
+            adaptive_top_k=adaptive_top_k,
+            bm25_weight=bm25_weight,
+            vector_weight=vector_weight,
+            needs_multi_step=(len(sub_queries) > 1),
+            confidence=0.85
+        )
+
+    def plan(self, user_query: str, chat_history: str = "", mock_response: Optional[str] = None) -> QueryPlan:
         if mock_response:
             return QueryPlan.model_validate_json(mock_response)
 
-        system_prompt = """You are an expert AI Query Planner for an advanced RAG system.
-Your job is to analyze the user query and output a strict JSON object representing the retrieval plan.
-Extract any temporal (year) or entity filters. Break complex questions into sub-queries.
-Determine if the strategy should be 'simple' (one fact), 'multi_step' (comparison/synthesis), or 'conversational'.
-
-Output JSON schema:
+        system_prompt = """You are the master AI Query Planner for an Adaptive Token-Efficient RAG platform.
+Analyze the user query in the context of recent chat history.
+Output strict JSON conforming to this schema:
 {
-    "intent": "string",
-    "sub_queries": ["string"],
-    "filters": {"key": "value"},
-    "retrieval_strategy": "string",
-    "confidence": float
+    "intent": "Core query intent",
+    "category": "simple" | "tabular" | "multi_step" | "comparative" | "temporal" | "visual" | "conversational",
+    "rewritten_query": "Fully resolved, standalone query removing ambiguity",
+    "expanded_queries": ["synonym 1", "keyword variation 2"],
+    "sub_queries": ["sub query 1", "sub query 2"],
+    "filters": {"document_name": "...", "year": 2024},
+    "adaptive_top_k": 6,
+    "bm25_weight": 0.5,
+    "vector_weight": 0.5,
+    "needs_multi_step": false,
+    "confidence": 0.9
 }
 """
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Chat History:\n{chat_history}\n\nCurrent Query: {user_query}"}
+        ]
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
+                messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
             raw_json = response.choices[0].message.content
             return QueryPlan.model_validate_json(raw_json)
-        except Exception as e:
-            # Graceful failure handling (Requirement #18)
-            print(f"[Warning] Llama Planner failed: {e}. Falling back to simple routing.")
-            return QueryPlan(
-                intent="fallback",
-                sub_queries=[user_query],
-                filters={},
-                retrieval_strategy="simple",
-                confidence=0.5
-            )
+        except Exception:
+            return self._rule_based_fallback(user_query)
