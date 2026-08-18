@@ -24,10 +24,10 @@ def test_self_evaluation_and_claim_verification():
     
     report = evaluator.evaluate_response(
         query="What was net revenue in 2024?",
-        context_chunks=[c1],
+        chunks=[c1],
         answer="Net revenue was $15M in 2024 [doc.pdf, p.1]."
     )
-    assert report.is_sufficient is True
+    assert report.is_supported_by_evidence is True
     assert report.faithfulness_score >= 0.85
 
 def test_retrieval_and_quality_token_metrics():

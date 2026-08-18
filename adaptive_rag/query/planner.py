@@ -7,7 +7,7 @@ from adaptive_rag.config import global_config
 
 class LlamaQueryPlanner:
     def __init__(self, api_key: str = "sk-mock", base_url: str = "http://localhost:11434/v1"):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=3.0)
         self.model_name = global_config.model.model_name
 
     def _rule_based_fallback(self, user_query: str) -> QueryPlan:
@@ -63,23 +63,24 @@ class LlamaQueryPlanner:
         if mock_response:
             return QueryPlan.model_validate_json(mock_response)
 
-        system_prompt = """You are the master AI Query Planner for an Adaptive Token-Efficient RAG platform.
-Analyze the user query in the context of recent chat history.
-Output strict JSON conforming to this schema:
-{
-    "intent": "Core query intent",
-    "category": "simple" | "tabular" | "multi_step" | "comparative" | "temporal" | "visual" | "conversational",
-    "rewritten_query": "Fully resolved, standalone query removing ambiguity",
-    "expanded_queries": ["synonym 1", "keyword variation 2"],
-    "sub_queries": ["sub query 1", "sub query 2"],
-    "filters": {"document_name": "...", "year": 2024},
-    "adaptive_top_k": 6,
-    "bm25_weight": 0.5,
-    "vector_weight": 0.5,
-    "needs_multi_step": false,
-    "confidence": 0.9
-}
-"""
+        system_prompt = (
+            "You are the master AI Query Planner for an Adaptive Token-Efficient RAG platform.\n"
+            "Analyze the user query in the context of recent chat history.\n"
+            "Output strict JSON conforming to this schema:\n"
+            "{\n"
+            '    "intent": "Core query intent",\n'
+            '    "category": "simple" | "tabular" | "multi_step" | "comparative" | "temporal" | "visual" | "conversational",\n'
+            '    "rewritten_query": "Fully resolved, standalone query removing ambiguity",\n'
+            '    "expanded_queries": ["synonym 1", "keyword variation 2"],\n'
+            '    "sub_queries": ["sub query 1", "sub query 2"],\n'
+            '    "filters": {"document_name": "...", "year": 2024},\n'
+            '    "adaptive_top_k": 6,\n'
+            '    "bm25_weight": 0.5,\n'
+            '    "vector_weight": 0.5,\n'
+            '    "needs_multi_step": false,\n'
+            '    "confidence": 0.9\n'
+            "}"
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Chat History:\n{chat_history}\n\nCurrent Query: {user_query}"}

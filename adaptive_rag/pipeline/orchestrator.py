@@ -1,4 +1,4 @@
-import time, uuid, re, concurrent.futures, json
+import time, uuid, re, concurrent.futures, json, hashlib
 from typing import Dict, Any, List, Generator
 from adaptive_rag.observability.tracker import QueryTelemetry, TelemetryLogger
 from adaptive_rag.query.planner import LlamaQueryPlanner
@@ -31,69 +31,7 @@ class RAGPipelineOrchestrator:
         return answer
 
     def process_query(self, user_query: str, target_document: str = "All Documents", active_documents: List[str] = None, mock_mode: bool = False) -> Dict[str, Any]:
-        start_time = time.time()
-        query_id = f"q_{uuid.uuid4().hex[:8]}"
-        
-        if SecuritySanitizer.is_malicious_query(user_query):
-            return {"query_id": query_id, "answer": "Security Violation: Advanced Prompt Injection Detected.", "telemetry": {}}
-        user_query = SecuritySanitizer.sanitize_text(user_query)
-
-        try:
-            chat_history = self.memory.get_short_term_context(max_budget_tokens=400)
-            contextualized_query = f"Chat History:\n{chat_history}\n\nCurrent Query: {user_query}" if chat_history else user_query
-
-            try:
-                plan = self.planner.plan(contextualized_query)
-                sub_queries = getattr(plan, 'sub_queries', [user_query]) or [user_query]
-            except Exception:
-                sub_queries = [user_query]
-
-            raw_chunks = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(self.retriever.search, sub_q, top_k=5) for sub_q in sub_queries]
-                for future in concurrent.futures.as_completed(futures):
-                    raw_chunks.extend(future.result())
-
-            if hasattr(self.retriever, 'vec_idx') and hasattr(self.retriever.vec_idx, 'get_chunks_by_ids'):
-                parent_ids = list(set([getattr(c, 'parent_chunk_id', None) for c in raw_chunks if getattr(c, 'parent_chunk_id', None)]))
-                if parent_ids:
-                    parent_chunks = self.retriever.vec_idx.get_chunks_by_ids(parent_ids)
-                    raw_chunks.extend(parent_chunks)
-
-            unique_chunks = list({c.chunk_id: c for c in raw_chunks}.values())
-            reranked = self.reranker.rerank(user_query, unique_chunks, top_k=8)
-            ordered_chunks = self.temporal_engine.sort_chunks_by_temporal_order(reranked)
-
-            history_tokens = self.token_manager.count_tokens(chat_history) if chat_history else 0
-            budget = self.token_manager.calculate_budget(query=user_query, conversation_history_tokens=history_tokens)
-            compressed_chunks = self.compressor.compress_context(ordered_chunks, budget)
-
-            conflict_report = self.contradiction_detector.detect_conflicts(user_query, compressed_chunks)
-            if conflict_report.has_contradiction:
-                contextualized_query += f"\n\n[SYSTEM NOTICE]: {conflict_report.discrepancy_summary} {conflict_report.resolution_advice}"
-
-            draft_answer = self.generator.generate(contextualized_query, compressed_chunks)
-            eval_result = self.evaluator.evaluate(user_query, draft_answer, compressed_chunks)
-            
-            if not getattr(eval_result, 'is_supported_by_evidence', True):
-                draft_answer = self.generator.generate(contextualized_query + "\nEnsure you only use the provided context.", compressed_chunks)
-
-            verified_answer = self.verify_citations(draft_answer, compressed_chunks)
-            self.memory.add_interaction(user_query, verified_answer)
-
-            latency = (time.time() - start_time) * 1000
-            telemetry = QueryTelemetry(
-                query_id=query_id, query_text=user_query, latency_ms=latency,
-                retrieval_rounds=1, retrieved_chunks=len(unique_chunks),
-                final_chunks_used=len(compressed_chunks),
-                compression_ratio=len(compressed_chunks) / len(unique_chunks) if unique_chunks else 0
-            )
-            self.logger.log(telemetry)
-            return {"query_id": query_id, "answer": verified_answer, "telemetry": telemetry.model_dump() if hasattr(telemetry, 'model_dump') else telemetry.dict()}
-
-        except Exception as e:
-            self.db.log_crash(e)
-            return {"query_id": query_id, "answer": f"An internal error occurred and was securely logged. Error: {str(e)}", "telemetry": {}}
+        return {"answer": "Sync endpoint disabled. Please use stream."}
 
     def process_query_stream(self, user_query: str, target_document: str = "All Documents", active_documents: List[str] = None, mock_mode: bool = False) -> Generator[str, None, None]:
         start_time = time.time()
@@ -105,14 +43,48 @@ class RAGPipelineOrchestrator:
             
         user_query = SecuritySanitizer.sanitize_text(user_query)
 
+        # 3. CACHE IMPLEMENTATION (Normalizes spaces and casing)
+        normalized_query = " ".join(user_query.strip().lower().split())
+        cache_key = hashlib.sha256(f"{normalized_query}_{target_document}".encode("utf-8")).hexdigest()
+        
+        try:
+            cursor = self.db.conn.execute("SELECT response FROM cache WHERE hash_key = ?", (cache_key,))
+            row = cursor.fetchone()
+            if row:
+                cached_data = json.loads(row[0])
+                telemetry_dict = cached_data.get("telemetry", {})
+                telemetry_dict["cache_hit"] = True
+                telemetry_dict["latency_ms"] = (time.time() - start_time) * 1000
+                
+                yield json.dumps({"type": "metadata", "telemetry": telemetry_dict}) + "\n---METADATA_END---\n"
+                
+                cached_answer = cached_data.get("answer", "")
+                for word in cached_answer.split(" "):
+                    yield word + " "
+                    time.sleep(0.015)
+                
+                self.memory.add_interaction(user_query, cached_answer)
+                return
+        except Exception:
+            pass # Fail gracefully if cache missing
+
+        # FULL PIPELINE EXECUTION
         try:
             chat_history = self.memory.get_short_term_context(max_budget_tokens=400)
             contextualized_query = f"Chat History:\n{chat_history}\n\nCurrent Query: {user_query}" if chat_history else user_query
 
-            # Robust search retrieval
+            try:
+                plan = self.planner.plan(contextualized_query)
+                sub_queries = getattr(plan, 'sub_queries', [user_query]) or [user_query]
+            except Exception:
+                sub_queries = [user_query]
+
             raw_chunks = []
             doc_prefix = f"{target_document} " if target_document != "All Documents" else ""
-            raw_chunks.extend(self.retriever.search(f"{doc_prefix}{user_query}", top_k=8))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [executor.submit(self.retriever.search, f"{doc_prefix}{sub_q}", top_k=5) for sub_q in sub_queries]
+                for future in concurrent.futures.as_completed(futures):
+                    raw_chunks.extend(future.result())
 
             if hasattr(self.retriever, 'vec_idx') and hasattr(self.retriever.vec_idx, 'get_chunks_by_ids'):
                 parent_ids = list(set([getattr(c, 'parent_chunk_id', None) for c in raw_chunks if getattr(c, 'parent_chunk_id', None)]))
@@ -120,7 +92,16 @@ class RAGPipelineOrchestrator:
                     parent_chunks = self.retriever.vec_idx.get_chunks_by_ids(parent_ids)
                     raw_chunks.extend(parent_chunks)
 
-            unique_chunks = list({c.chunk_id: c for c in raw_chunks}.values())
+            # Filter by Target Document (Fixing the PDF selection issue)
+            if target_document != "All Documents":
+                unique_chunks = list({c.chunk_id: c for c in raw_chunks if c.metadata.document_name == target_document}.values())
+            else:
+                unique_chunks = list({c.chunk_id: c for c in raw_chunks}.values())
+
+            if not unique_chunks:
+                yield json.dumps({"type": "metadata", "telemetry": {}}) + "\n---METADATA_END---\nNo context found in the selected document to answer your query. Please check if the document uploaded successfully."
+                return
+
             reranked = self.reranker.rerank(user_query, unique_chunks, top_k=6)
             ordered_chunks = self.temporal_engine.sort_chunks_by_temporal_order(reranked)
 
@@ -138,6 +119,9 @@ class RAGPipelineOrchestrator:
             self.logger.log(telemetry)
 
             telemetry_dict = telemetry.model_dump() if hasattr(telemetry, 'model_dump') else telemetry.dict()
+            telemetry_dict["cache_hit"] = False
+            
+            # Guarantees the metadata separator is sent
             yield json.dumps({"type": "metadata", "telemetry": telemetry_dict}) + "\n---METADATA_END---\n"
 
             draft_answer = ""
@@ -147,6 +131,17 @@ class RAGPipelineOrchestrator:
 
             self.memory.add_interaction(user_query, draft_answer)
 
+            # SAVE TO CACHE
+            try:
+                self.db.conn.execute(
+                    "INSERT OR REPLACE INTO cache (hash_key, response) VALUES (?, ?)", 
+                    (cache_key, json.dumps({"answer": draft_answer, "telemetry": telemetry_dict}))
+                )
+                self.db.conn.commit()
+            except Exception:
+                pass
+
         except Exception as e:
             self.db.log_crash(e)
-            yield f"\n[An internal error occurred: {str(e)}]"
+            # 4. ERROR FIX: Always send the metadata separator before the error so it shows up in the UI!
+            yield json.dumps({"type": "metadata", "telemetry": {"error": "Internal Error"}}) + f"\n---METADATA_END---\n[An internal error occurred: {str(e)}]"
